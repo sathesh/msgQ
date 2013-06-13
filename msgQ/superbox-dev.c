@@ -4,6 +4,7 @@
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <asm/uaccess.h>
 
 
@@ -36,7 +37,9 @@ struct sb_msg {
 
 LIST_HEAD(sb_in_list);
 LIST_HEAD(sb_out_list);
-DEFINE_MUTEX(msg_lock);
+DEFINE_MUTEX(sbdev_lock);
+DECLARE_WAIT_QUEUE_HEAD(sbdev_waitq);
+
 u32 msg_count = 0;
 
 static int sb_open(struct inode *in, struct file *filp)
@@ -63,11 +66,29 @@ static ssize_t sb_read(struct file *filp, char __user *buf, size_t cnt, loff_t *
     struct sb_msg *msg = NULL;
     ssize_t ret=0;
 
-    pr_notice(SB "Read: offset: %u, cnt:%u", *offset, cnt);
+    pr_notice(SB "Read: offset: %u, ", *offset);
+
+    if (! (filp->f_mode & FMODE_READ)){
+        pr_err(SB "no read permission");
+        ret = -EPERM;
+        goto end1;
+    }
 
     if (msg_count == 0) {
         pr_err(SB "no msg available");
-        return 0;
+        if (filp->f_flags & O_NONBLOCK) {
+            ret = -EAGAIN;
+            goto end1;
+        }
+        else {
+            wait_event_interruptible(sbdev_waitq, (msg_count != 0));
+        }
+    }
+
+    mutex_lock(&sbdev_lock);
+    if (msg_count == 0) {
+        ret = -EINTR;
+        goto end2;
     }
 
     list_for_each_safe(pos, q, &sb_in_list) {
@@ -75,12 +96,11 @@ static ssize_t sb_read(struct file *filp, char __user *buf, size_t cnt, loff_t *
         break;
     }
 
-    if (msg != NULL && cnt >= msg->len+sizeof(u16))
-    {
-        if (copy_to_user(buf, (char*)msg + sizeof(msg->list), msg->len+sizeof(u16)))
-        {
+    if (msg != NULL && cnt >= msg->len+sizeof(u16)) {
+        if (copy_to_user(buf, (char*)msg + sizeof(msg->list), msg->len+sizeof(u16))) {
             pr_err(SB "user address fault");
-            return -EFAULT;
+            ret = -EFAULT;
+            goto end2;
         }
         list_del(pos);
         ret = msg->len+sizeof(u16);
@@ -88,6 +108,16 @@ static ssize_t sb_read(struct file *filp, char __user *buf, size_t cnt, loff_t *
         kfree(msg);
         msg_count--;
     }
+    else {
+        pr_err(SB "User buf length is short");
+        ret = 0;
+    }
+
+
+
+end2:
+    mutex_unlock(&sbdev_lock);
+end1:
     pr_notice(SB "read: done");
     return ret;
 }
@@ -96,27 +126,48 @@ static ssize_t sb_read(struct file *filp, char __user *buf, size_t cnt, loff_t *
 static ssize_t sb_write(struct file *filp, const char __user *buf, size_t cnt, loff_t *offset)
 {
     struct sb_msg *msg;
+    ssize_t ret=0;
+
     pr_notice(SB "write device");
+
+    if (! (filp->f_mode & FMODE_WRITE)){
+        pr_err(SB "no write permission");
+        ret = -EPERM;
+        goto end1;
+    }
 
     if (cnt < 0)
         return 0;
 
 
     msg = kmalloc(sizeof(struct sb_msg)+cnt-sizeof(u16), GFP_KERNEL);
-    if (msg == NULL)
-        return -ENOMEM;
-
-    if (copy_from_user((char*)msg + sizeof(msg->list), buf, cnt))
-    {
-        kfree(msg);
-        return -EFAULT;
+    if (msg == NULL) {
+        pr_err(SB "No memory");
+        ret = -ENOMEM;
+        goto end1;
     }
 
+    mutex_lock(&sbdev_lock);
+
+    if (copy_from_user((char*)msg + sizeof(msg->list), buf, cnt)) {
+        kfree(msg);
+        pr_err(SB "user address fault");
+        ret = -EFAULT;
+        goto end2;
+    }
+
+    ret = cnt;
     list_add(&msg->list,&sb_in_list);
     msg_count++;
 
     pr_notice(SB "type =%u, len: %u, data:%s",msg->type, msg->len,msg->data);
-    return cnt;
+
+end2:
+    mutex_unlock(&sbdev_lock);
+    wake_up_interruptible(&sbdev_waitq);
+end1:
+    pr_notice(SB "write: done");
+    return ret;
 }
 
 int superbox_chardev_init()
@@ -125,8 +176,7 @@ int superbox_chardev_init()
 
     pr_notice(SB "Init ");
 
-    if ((result = misc_register(&sb_dev)) < 0)
-    {
+    if ((result = misc_register(&sb_dev)) < 0) {
         pr_err(SB "misc_register failed: %u", result);
         goto exit_end;
     }
@@ -143,8 +193,7 @@ void superbox_chardev_exit()
 
     pr_notice(SB "exit ");
 
-    if ((result = misc_deregister(&sb_dev)) < 0)
-    {
+    if ((result = misc_deregister(&sb_dev)) < 0) {
         pr_err(SB "misc_deregister failed: %u", result);
         goto exit_end;
     }
