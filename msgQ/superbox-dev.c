@@ -47,6 +47,10 @@ static int sb_open(struct inode *in, struct file *filp)
     pr_notice(SB "Opening device %u:%u,  mode: 0x%x",
             imajor(in), iminor(in), filp->f_mode);
 
+    if (unlikely(exiting)) {
+        return -EIO;
+    }
+
     return 0;
 }
 
@@ -54,7 +58,6 @@ static int sb_release(struct inode *in, struct file *filp)
 {
     pr_notice(SB "Releasing device %u:%u",
             imajor(in), iminor(in));
-
 
     return 0;
 }
@@ -81,9 +84,16 @@ static ssize_t sb_read(struct file *filp, char __user *buf, size_t cnt, loff_t *
             goto end1;
         }
         else {
-            wait_event_interruptible(sbdev_waitq, (msg_count != 0));
+            wait_event_interruptible(sbdev_waitq, (msg_count != 0 || exiting == 1));
         }
     }
+
+    if (unlikely(exiting)) {
+        pr_notice(SB "read: module exiting");
+        ret = -EIO;
+        goto end1;
+    }
+
 
     mutex_lock(&sbdev_lock);
     if (msg_count == 0) {
@@ -112,8 +122,6 @@ static ssize_t sb_read(struct file *filp, char __user *buf, size_t cnt, loff_t *
         pr_err(SB "User buf length is short");
         ret = 0;
     }
-
-
 
 end2:
     mutex_unlock(&sbdev_lock);
@@ -181,7 +189,7 @@ int superbox_chardev_init()
         goto exit_end;
     }
 
-    pr_notice(SB "Init success. %u devices are added. Buf size : %u", max_devs, buf_size);
+    pr_notice(SB "Init success. %u devices are added. ", max_devs);
     pr_notice(SB "size list = %u, msb_msg = %u", sizeof(struct list_head), sizeof(struct sb_msg));
 exit_end:
     return result;
@@ -189,10 +197,26 @@ exit_end:
 
 void superbox_chardev_exit()
 {
+    struct sb_msg *msg = NULL;
+    struct list_head *pos, *q;
     u32 result = 0;
 
     pr_notice(SB "exit ");
 
+    wake_up_interruptible(&sbdev_waitq);
+
+    mutex_lock(&sbdev_lock);
+
+    list_for_each_safe(pos, q, &sb_in_list) {
+        msg = list_entry(pos, struct sb_msg, list);
+        list_del(pos);
+        kfree(msg);
+        msg_count--;
+    }
+
+    mutex_unlock(&sbdev_lock);
+
+    pr_notice(SB "exit msg_count=%u ", msg_count);
     if ((result = misc_deregister(&sb_dev)) < 0) {
         pr_err(SB "misc_deregister failed: %u", result);
         goto exit_end;

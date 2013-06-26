@@ -13,7 +13,7 @@ int main()
     int len;
     struct sb_msg *msg = malloc(sizeof(struct sb_msg) + 15);
 
-    fd = open("/dev/sbnode", O_RDONLY|O_NONBLOCK);
+    fd = open("/dev/sbnode", O_RDONLY);
     if (fd < 0)
     {
         perror("open");
