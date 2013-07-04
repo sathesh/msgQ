@@ -1,3 +1,31 @@
 Description
 ===========
-    Implementing a simple message passing mechanism using Char driver. This is only for learining kernel interanls.
+    A simple message passing mechanism across processes using Char driver. This is only for learining kernel interanls.
+
+1. Char device driver module is created for sudo device. 
+
+2. Application can read and write msg from/to the device in the following structure format 
+
+struct sb_msg {
+    unsigned short type:3;
+    unsigned short len:13;
+    unsigned char  data[0];
+};
+
+3. Driver will keep the messages in linked list and returns message sequencially on read.
+
+4. Blocking and non-blocking read modes are supported.
+
+5. Synchronozation is taken care.
+
+
+TODO List
+========
+1. Create a proc entry to read number of message in the list and print messages.
+
+2. Create a worker to reverse the message in in-list and add to out-list. Read will happen from out-list and write will write to in-list.
+  i. worker can be a tasklet, work queue, delayed work queue or kernel thread. 
+  ii. type of thread will be passed as module param.
+
+ 
+
